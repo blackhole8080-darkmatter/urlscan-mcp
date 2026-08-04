@@ -1,0 +1,24 @@
+[project]
+name = "urlscan-mcp"
+version = "0.1.0"
+description = "MCP server for the urlscan.io API — scan, search and assess URLs from any MCP client"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+urlscan-mcp = "urlscan_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["urlscan_mcp"]
