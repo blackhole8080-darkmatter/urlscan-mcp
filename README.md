@@ -43,6 +43,16 @@ This server is built around four decisions:
    *has* been scanned is the same failure as reading a missing verdict as
    "clean", so both lookups query `(page.X OR task.X)`.
 
+   The trap is what comes next. A redirected scan's `page.*` fields describe
+   the *destination*, so reading apex domain age or Umbrella rank off them
+   credits the indicator with someone else's reputation — `lzphy.top` inherited
+   github.com's 13-year age and rank 1508, which in turn suppressed the "no
+   established traffic" risk signal. `assess_indicator` therefore derives
+   reputation only from scans that actually landed on the indicator, reports
+   `scans_redirected_away` and `redirect_destinations` separately, and says
+   explicitly when no signal can be attributed. Manufacturing a good reputation
+   is a worse failure than withholding a verdict.
+
 ---
 
 ## Install
@@ -167,7 +177,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-30 offline tests — no network, no key required. They cover query escaping,
+35 offline tests — no network, no key required. They cover query escaping,
 redirector matching (`page.*` vs `task.*`),
 input validation, auth degradation, response shaping against malformed
 documents, and the assessment logic's refusal to imply safety.

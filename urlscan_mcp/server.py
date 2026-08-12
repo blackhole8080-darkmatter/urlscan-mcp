@@ -384,6 +384,35 @@ async def server_capabilities() -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
+def _partition_by_landing(
+    indicator: str, kind: str, results: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split scans into those that landed on the indicator and those that left.
+
+    Matching `task.domain` as well as `page.domain` finds redirectors, but the
+    page.* fields of a redirected scan describe wherever it ended up. Reading
+    apex domain age or Umbrella rank off those would credit the indicator with
+    the destination's reputation — reporting a day-old throwaway domain as a
+    decade-old top-1500 site because it bounced to github.com.
+
+    Only domain lookups can be partitioned meaningfully; for IP, URL and hash
+    lookups every result is treated as landed, which is the previous behaviour.
+    """
+    if kind != "domain":
+        return list(results), []
+
+    target = indicator.strip().lower().lstrip(".")
+    landed: list[dict[str, Any]] = []
+    redirected: list[dict[str, Any]] = []
+    for r in results:
+        page_domain = (r.get("domain") or "").lower()
+        if page_domain == target or page_domain.endswith(f".{target}"):
+            landed.append(r)
+        else:
+            redirected.append(r)
+    return landed, redirected
+
+
 def _classify(indicator: str) -> tuple[str, str] | None:
     value = indicator.strip()
     if re.fullmatch(r"[A-Fa-f0-9]{64}", value):
@@ -439,6 +468,15 @@ async def assess_indicator(indicator: str, days: int = 180) -> dict[str, Any]:
             ],
         }
 
+    # Scans reached via task.* may have landed on a completely different site.
+    # Their page.* fields — apex domain age, Umbrella rank, hosting ASN —
+    # describe the DESTINATION, not the indicator asked about. Attributing them
+    # to the indicator would report a throwaway redirector as a decade-old
+    # top-ranked domain, which is a worse failure than saying nothing: it
+    # manufactures reputation rather than merely withholding a verdict.
+    landed, redirected = _partition_by_landing(indicator, kind, results)
+    signal_source = landed if landed else []
+
     scores = [r["verdict_score"] for r in results if isinstance(r["verdict_score"], (int, float))]
     flagged = [r for r in results if r.get("malicious") is True]
     # The free search tier omits verdicts entirely. Distinguishing "no verdict
@@ -447,13 +485,15 @@ async def assess_indicator(indicator: str, days: int = 180) -> dict[str, Any]:
     verdicts_available = bool(scores) or any(r.get("malicious") is not None for r in results)
 
     tags = _tally(tag for r in results for tag in (r.get("tags") or []))
-    countries = _tally(r["country"] for r in results if r.get("country"))
-    asns = _tally(r["asn_name"] for r in results if r.get("asn_name"))
-    domains = _tally(r["domain"] for r in results if r.get("domain"))
     times = sorted(r["scanned_at"] for r in results if r.get("scanned_at"))
+    domains = _tally(r["domain"] for r in results if r.get("domain"))
 
-    ages = [r["apex_domain_age_days"] for r in results if isinstance(r.get("apex_domain_age_days"), int)]
-    ranks = [r["umbrella_rank"] for r in results if isinstance(r.get("umbrella_rank"), int)]
+    # Hosting and reputation are read only from scans that actually landed on
+    # the indicator. See _partition_by_landing.
+    countries = _tally(r["country"] for r in signal_source if r.get("country"))
+    asns = _tally(r["asn_name"] for r in signal_source if r.get("asn_name"))
+    ages = [r["apex_domain_age_days"] for r in signal_source if isinstance(r.get("apex_domain_age_days"), int)]
+    ranks = [r["umbrella_rank"] for r in signal_source if isinstance(r.get("umbrella_rank"), int)]
 
     verdicts: dict[str, Any] = {"available": verdicts_available}
     if verdicts_available:
@@ -481,12 +521,28 @@ async def assess_indicator(indicator: str, days: int = 180) -> dict[str, Any]:
         "first_seen": times[0] if times else None,
         "last_seen": times[-1] if times else None,
         "verdicts": verdicts,
+        "scans_landing_on_indicator": len(landed),
+        "scans_redirected_away": len(redirected),
+        "redirect_destinations": _tally(
+            r["domain"] for r in redirected if r.get("domain")
+        )[:10],
         "reputation_signals": {
+            "derived_from_scans": len(signal_source),
             "min_apex_domain_age_days": min(ages) if ages else None,
             "best_umbrella_rank": min(ranks) if ranks else None,
             "ranked_in_umbrella": bool(ranks),
             "distinct_hosting_countries": len(countries),
             "distinct_asns": len(asns),
+            **(
+                {
+                    "note": "Every scan of this indicator redirected elsewhere, so "
+                    "no reputation signal can be attributed to it. The values above "
+                    "are empty by design — they are NOT evidence of good standing. "
+                    "See redirect_destinations."
+                }
+                if not landed
+                else {}
+            ),
         },
         "risk_signals": _risk_signals(ages, ranks, tags, flagged, scores),
         "recurring_tags": tags[:10],

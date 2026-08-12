@@ -75,6 +75,55 @@ def test_classify_url_covers_redirectors():
     assert 'page.url:"https://example.com/x"' in query
 
 
+# -- reputation must not leak from the redirect destination ----------------
+# Matching task.* finds redirectors, but their page.* fields describe wherever
+# the scan landed. Reading apex domain age / Umbrella rank off those credits
+# the indicator with the destination's reputation — a throwaway .top domain
+# inheriting github.com's 13-year age and rank 1508, which also suppressed the
+# "no established traffic" risk signal. Manufacturing good reputation is worse
+# than withholding a verdict.
+
+_REDIRECTED = {"domain": "github.com", "apex_domain_age_days": 4887, "umbrella_rank": 1508}
+_LANDED = {"domain": "lzphy.top", "apex_domain_age_days": 3, "umbrella_rank": None}
+
+
+def test_partition_separates_redirected_scans():
+    landed, redirected = s._partition_by_landing(
+        "lzphy.top", "domain", [_LANDED, _REDIRECTED]
+    )
+    assert landed == [_LANDED]
+    assert redirected == [_REDIRECTED]
+
+
+def test_partition_counts_subdomains_as_landed():
+    hit = {"domain": "tmdb.lzphy.top"}
+    landed, redirected = s._partition_by_landing("lzphy.top", "domain", [hit])
+    assert landed == [hit]
+    assert redirected == []
+
+
+def test_partition_is_case_insensitive():
+    hit = {"domain": "LZPHY.TOP"}
+    landed, _ = s._partition_by_landing("lzphy.top", "domain", [hit])
+    assert landed == [hit]
+
+
+def test_partition_does_not_match_suffix_lookalikes():
+    """evil-lzphy.top must not count as landing on lzphy.top."""
+    hit = {"domain": "evil-lzphy.top"}
+    landed, redirected = s._partition_by_landing("lzphy.top", "domain", [hit])
+    assert landed == []
+    assert redirected == [hit]
+
+
+def test_partition_passes_through_non_domain_lookups():
+    hits = [_REDIRECTED]
+    for kind in ("ip", "url", "hash"):
+        landed, redirected = s._partition_by_landing("whatever", kind, hits)
+        assert landed == hits
+        assert redirected == []
+
+
 def test_submitted_or_final_still_escapes_query_syntax():
     """Injected input cannot become a live field query.
 
