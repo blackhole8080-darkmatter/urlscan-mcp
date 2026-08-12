@@ -177,4 +177,15 @@ documents, and the assessment logic's refusal to imply safety.
 
 ---
 
+## Who built this
+
+I build MCP servers and LLM agent integrations against real systems. If you have
+an internal API your team would want to drive from Claude, Cursor, or any other
+MCP client, that is a fixed-price, five-day job — aryan.kshir10@gmail.com.
+
+Also: [DEEP](https://github.com/blackhole8080-darkmatter/DEEP), a local-first AI
+assistant with a cybersecurity engine, MIT.
+
+---
+
 MIT. Not affiliated with urlscan.io.
