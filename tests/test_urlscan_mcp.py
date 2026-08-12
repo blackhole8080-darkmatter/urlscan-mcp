@@ -45,6 +45,55 @@ def test_classify_rejects_garbage():
     assert s._classify("") is None
 
 
+# -- redirect blind spot ---------------------------------------------------
+# A domain that redirects away is recorded under task.domain but NOT under
+# page.domain. Querying page.* alone reported "no scans found" for indicators
+# that had in fact been scanned — the same class of error as reading a missing
+# verdict as "clean". Verified live: page.domain:lzphy.top -> 0 hits,
+# task.domain:lzphy.top -> 1 hit (the page redirected to github.com).
+
+
+def test_domain_query_matches_submitted_and_final():
+    query = s._submitted_or_final("domain", "lzphy.top")
+    assert "page.domain:" in query
+    assert "task.domain:" in query
+    assert query.startswith("(") and query.endswith(")")
+    assert " OR " in query
+
+
+def test_classify_domain_covers_redirectors():
+    kind, query = s._classify("lzphy.top")
+    assert kind == "domain"
+    assert "task.domain:lzphy.top" in query
+    assert "page.domain:lzphy.top" in query
+
+
+def test_classify_url_covers_redirectors():
+    kind, query = s._classify("https://example.com/x")
+    assert kind == "url"
+    assert 'task.url:"https://example.com/x"' in query
+    assert 'page.url:"https://example.com/x"' in query
+
+
+def test_submitted_or_final_still_escapes_query_syntax():
+    """Injected input cannot become a live field query.
+
+    _escape deliberately leaves bare words (including AND/OR) alone — see
+    test_escape_neutralises_query_syntax — so what matters is that the
+    structural characters are neutralised: an attacker-supplied
+    'page.domain:' must not survive as a field selector, and unbalanced
+    parentheses must not break out of the clause.
+    """
+    query = s._submitted_or_final("domain", "evil.com) OR page.domain:(good.com")
+    assert "page.domain\\:" in query  # colon escaped -> literal term, not a field
+    assert "\\)" in query and "\\(" in query
+    # exactly one live field selector per side, both of them ours
+    assert query.count("page.domain:") == 1
+    assert query.count("task.domain:") == 1
+    # the clause stays balanced: one real opening and closing paren
+    assert query.startswith("(") and query.endswith(")")
+
+
 # -- validation ------------------------------------------------------------
 
 

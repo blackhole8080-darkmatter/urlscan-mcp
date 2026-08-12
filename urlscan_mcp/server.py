@@ -40,6 +40,25 @@ def _time_filter(days: int | None) -> str:
     return f" AND date:>now-{int(days)}d"
 
 
+def _submitted_or_final(field: str, value: str, quoted: bool = False) -> str:
+    """Match both what was submitted and where the scan actually landed.
+
+    urlscan records the submitted URL under `task.*` and the final,
+    post-redirect page under `page.*`. Querying `page.*` alone silently misses
+    every domain that redirects away — which is precisely what link shorteners,
+    phishing redirectors and traffic distribution systems do. Verified against
+    the live API: `page.domain:lzphy.top` returns 0 hits while
+    `task.domain:lzphy.top` returns the scan, because the page redirected to
+    github.com.
+
+    Reporting "no scans found" for an indicator that has been scanned is the
+    same class of error as reading a missing verdict as "clean": it turns a gap
+    in the query into an apparent absence of findings.
+    """
+    rendered = f'"{value}"' if quoted else _escape(value)
+    return f"(page.{field}:{rendered} OR task.{field}:{rendered})"
+
+
 # --------------------------------------------------------------------------
 # Submission
 # --------------------------------------------------------------------------
@@ -259,8 +278,12 @@ async def search_scans(query: str, size: int = 20) -> dict[str, Any]:
 async def search_by_domain(
     domain: str, days: int = 90, size: int = 20
 ) -> dict[str, Any]:
-    """Find recent scans of a domain. Matches the domain and its subdomains."""
-    query = f"page.domain:{_escape(domain)}{_time_filter(days)}"
+    """Find recent scans of a domain. Matches the domain and its subdomains.
+
+    Matches both scans that landed on the domain and scans that were pointed at
+    it but redirected elsewhere.
+    """
+    query = f"{_submitted_or_final('domain', domain)}{_time_filter(days)}"
     return await _search(query, size)
 
 
@@ -371,9 +394,9 @@ def _classify(indicator: str) -> tuple[str, str] | None:
     except ValueError:
         pass
     if value.lower().startswith(("http://", "https://")):
-        return "url", f'page.url:"{value}"'
+        return "url", _submitted_or_final("url", value, quoted=True)
     if re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value):
-        return "domain", f"page.domain:{_escape(value)}"
+        return "domain", _submitted_or_final("domain", value)
     return None
 
 

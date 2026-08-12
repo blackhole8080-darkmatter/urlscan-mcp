@@ -16,7 +16,7 @@ result document is frequently **several megabytes**: every request, every
 response header, every cookie. Handed to a model verbatim it swallows the
 context window and buries the handful of facts anyone wanted.
 
-This server is built around three decisions:
+This server is built around four decisions:
 
 1. **Responses are shaped, not forwarded.** Every tool returns a summary built
    for a model to reason over. The raw document stays one `full=True` away.
@@ -32,6 +32,16 @@ This server is built around three decisions:
    this one distinguishes *no data* from *no findings*, everywhere, and falls
    back to signals it can actually observe: apex domain age, Umbrella
    popularity rank, and submitter tags.
+4. **Domain and URL lookups match redirectors.** urlscan records the submitted
+   URL under `task.*` and the final, post-redirect page under `page.*`.
+   Querying `page.*` alone — which is what the obvious implementation does —
+   silently misses every domain that redirects away, and redirecting away is
+   exactly what link shorteners, phishing redirectors and traffic distribution
+   systems do. Verified against the live API: `page.domain:lzphy.top` returns
+   zero hits while `task.domain:lzphy.top` returns the scan, because the page
+   redirected to github.com. Reporting "no scans found" for an indicator that
+   *has* been scanned is the same failure as reading a missing verdict as
+   "clean", so both lookups query `(page.X OR task.X)`.
 
 ---
 
@@ -157,7 +167,8 @@ pip install -e ".[dev]"
 pytest
 ```
 
-26 offline tests — no network, no key required. They cover query escaping,
+30 offline tests — no network, no key required. They cover query escaping,
+redirector matching (`page.*` vs `task.*`),
 input validation, auth degradation, response shaping against malformed
 documents, and the assessment logic's refusal to imply safety.
 
