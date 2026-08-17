@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from urlscan_mcp import assess as a
+from urlscan_mcp import query as q
 from urlscan_mcp import server as s
 from urlscan_mcp.client import UrlscanClient, UrlscanError
 from urlscan_mcp.shaping import summarize_result, summarize_search_hit, truncate
@@ -13,15 +15,15 @@ from urlscan_mcp.shaping import summarize_result, summarize_search_hit, truncate
 
 
 def test_escape_neutralises_query_syntax():
-    assert s._escape("a:b") == r"a\:b"
-    assert s._escape("evil AND page.domain") == r"evil AND page.domain"  # words are fine
-    assert s._escape("a(b)c") == r"a\(b\)c"
+    assert q.escape("a:b") == r"a\:b"
+    assert q.escape("evil AND page.domain") == r"evil AND page.domain"  # words are fine
+    assert q.escape("a(b)c") == r"a\(b\)c"
 
 
 def test_time_filter():
-    assert s._time_filter(30) == " AND date:>now-30d"
-    assert s._time_filter(0) == ""
-    assert s._time_filter(None) == ""
+    assert q.time_filter(30) == " AND date:>now-30d"
+    assert q.time_filter(0) == ""
+    assert q.time_filter(None) == ""
 
 
 @pytest.mark.parametrize(
@@ -35,14 +37,14 @@ def test_time_filter():
     ],
 )
 def test_classify(value, kind):
-    result = s._classify(value)
+    result = q.classify(value)
     assert result is not None
     assert result[0] == kind
 
 
 def test_classify_rejects_garbage():
-    assert s._classify("!!!") is None
-    assert s._classify("") is None
+    assert q.classify("!!!") is None
+    assert q.classify("") is None
 
 
 # -- redirect blind spot ---------------------------------------------------
@@ -54,7 +56,7 @@ def test_classify_rejects_garbage():
 
 
 def test_domain_query_matches_submitted_and_final():
-    query = s._submitted_or_final("domain", "lzphy.top")
+    query = q.submitted_or_final("domain", "lzphy.top")
     assert "page.domain:" in query
     assert "task.domain:" in query
     assert query.startswith("(") and query.endswith(")")
@@ -62,14 +64,14 @@ def test_domain_query_matches_submitted_and_final():
 
 
 def test_classify_domain_covers_redirectors():
-    kind, query = s._classify("lzphy.top")
+    kind, query = q.classify("lzphy.top")
     assert kind == "domain"
     assert "task.domain:lzphy.top" in query
     assert "page.domain:lzphy.top" in query
 
 
 def test_classify_url_covers_redirectors():
-    kind, query = s._classify("https://example.com/x")
+    kind, query = q.classify("https://example.com/x")
     assert kind == "url"
     assert 'task.url:"https://example.com/x"' in query
     assert 'page.url:"https://example.com/x"' in query
@@ -88,7 +90,7 @@ _LANDED = {"domain": "lzphy.top", "apex_domain_age_days": 3, "umbrella_rank": No
 
 
 def test_partition_separates_redirected_scans():
-    landed, redirected = s._partition_by_landing(
+    landed, redirected = a.partition_by_landing(
         "lzphy.top", "domain", [_LANDED, _REDIRECTED]
     )
     assert landed == [_LANDED]
@@ -97,21 +99,21 @@ def test_partition_separates_redirected_scans():
 
 def test_partition_counts_subdomains_as_landed():
     hit = {"domain": "tmdb.lzphy.top"}
-    landed, redirected = s._partition_by_landing("lzphy.top", "domain", [hit])
+    landed, redirected = a.partition_by_landing("lzphy.top", "domain", [hit])
     assert landed == [hit]
     assert redirected == []
 
 
 def test_partition_is_case_insensitive():
     hit = {"domain": "LZPHY.TOP"}
-    landed, _ = s._partition_by_landing("lzphy.top", "domain", [hit])
+    landed, _ = a.partition_by_landing("lzphy.top", "domain", [hit])
     assert landed == [hit]
 
 
 def test_partition_does_not_match_suffix_lookalikes():
     """evil-lzphy.top must not count as landing on lzphy.top."""
     hit = {"domain": "evil-lzphy.top"}
-    landed, redirected = s._partition_by_landing("lzphy.top", "domain", [hit])
+    landed, redirected = a.partition_by_landing("lzphy.top", "domain", [hit])
     assert landed == []
     assert redirected == [hit]
 
@@ -119,7 +121,7 @@ def test_partition_does_not_match_suffix_lookalikes():
 def test_partition_passes_through_non_domain_lookups():
     hits = [_REDIRECTED]
     for kind in ("ip", "url", "hash"):
-        landed, redirected = s._partition_by_landing("whatever", kind, hits)
+        landed, redirected = a.partition_by_landing("whatever", kind, hits)
         assert landed == hits
         assert redirected == []
 
@@ -133,7 +135,7 @@ def test_submitted_or_final_still_escapes_query_syntax():
     'page.domain:' must not survive as a field selector, and unbalanced
     parentheses must not break out of the clause.
     """
-    query = s._submitted_or_final("domain", "evil.com) OR page.domain:(good.com")
+    query = q.submitted_or_final("domain", "evil.com) OR page.domain:(good.com")
     assert "page.domain\\:" in query  # colon escaped -> literal term, not a field
     assert "\\)" in query and "\\(" in query
     # exactly one live field selector per side, both of them ours
@@ -246,17 +248,17 @@ def test_summarize_search_hit_handles_absent_verdicts():
 
 
 def test_risk_signals_flag_young_domain():
-    signals = s._risk_signals(ages=[5], ranks=[1], tags=[], flagged=[], scores=[])
+    signals = a.risk_signals(ages=[5], ranks=[1], tags=[], flagged=[], scores=[])
     assert any("young" in sig for sig in signals)
 
 
 def test_risk_signals_flag_unranked_domain():
-    signals = s._risk_signals(ages=[9000], ranks=[], tags=[], flagged=[], scores=[])
+    signals = a.risk_signals(ages=[9000], ranks=[], tags=[], flagged=[], scores=[])
     assert any("Umbrella" in sig for sig in signals)
 
 
 def test_assessment_never_claims_clean_without_verdicts():
-    sentence = s._assessment_sentence(
+    sentence = a.assessment_sentence(
         "domain", total=10, flagged=[], scores=[], verdicts_available=False,
         ages=[9000], ranks=[1000],
     )
@@ -264,7 +266,7 @@ def test_assessment_never_claims_clean_without_verdicts():
 
 
 def test_assessment_flags_malicious_when_verdicts_present():
-    sentence = s._assessment_sentence(
+    sentence = a.assessment_sentence(
         "domain", total=10, flagged=[{}] * 6, scores=[90], verdicts_available=True,
         ages=[9000], ranks=[1000],
     )
@@ -272,7 +274,7 @@ def test_assessment_flags_malicious_when_verdicts_present():
 
 
 def test_assessment_downgrades_young_unranked_domain():
-    sentence = s._assessment_sentence(
+    sentence = a.assessment_sentence(
         "domain", total=3, flagged=[], scores=[], verdicts_available=True,
         ages=[4], ranks=[],
     )
@@ -280,6 +282,102 @@ def test_assessment_downgrades_young_unranked_domain():
 
 
 def test_tally_orders_by_frequency():
-    tallied = s._tally(["a", "b", "a", "a", "b", "c"])
+    tallied = a.tally(["a", "b", "a", "a", "b", "c"])
     assert tallied[0] == {"value": "a", "count": 3}
     assert tallied[1] == {"value": "b", "count": 2}
+
+
+# -- build_assessment: the contract embedding applications depend on ---------
+#
+# DEEP fetches urlscan through its own HTTP stack and calls build_assessment
+# directly, so these guarantees are load-bearing outside this server too.
+
+
+def _hit(**overrides):
+    base = {
+        "uuid": "u1",
+        "url": "https://evil.test/",
+        "domain": "evil.test",
+        "country": "US",
+        "asn_name": "EXAMPLE",
+        "scanned_at": "2026-01-01T00:00:00Z",
+        "tags": [],
+        "apex_domain_age_days": 9000,
+        "umbrella_rank": 1000,
+        "verdict_score": None,
+        "malicious": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_build_assessment_reports_no_scans_without_implying_safety():
+    out = a.build_assessment("evil.test", "domain", [], days=180)
+    assert out["scans_found"] == 0
+    assert "not evidence of safety" in " ".join(out["caveats"])
+    assert "clean" not in out["assessment"].lower()
+
+
+def test_build_assessment_marks_verdicts_unavailable_when_absent():
+    out = a.build_assessment("evil.test", "domain", [_hit()], days=180)
+    assert out["verdicts"]["available"] is False
+    assert "does NOT mean the indicator is clean" in out["verdicts"]["note"]
+    assert "flagged_malicious" not in out["verdicts"]
+
+
+def test_build_assessment_reads_verdicts_when_present():
+    out = a.build_assessment(
+        "evil.test", "domain",
+        [_hit(verdict_score=80, malicious=True), _hit(verdict_score=0, malicious=False)],
+        days=180,
+    )
+    assert out["verdicts"]["available"] is True
+    assert out["verdicts"]["flagged_malicious"] == 1
+    assert out["verdicts"]["max_score"] == 80
+
+
+def test_build_assessment_withholds_reputation_from_redirected_scans():
+    """A redirector must not inherit its destination's age and rank."""
+    redirected = _hit(domain="github.com", apex_domain_age_days=4700, umbrella_rank=1508)
+    out = a.build_assessment("lzphy.top", "domain", [redirected], days=180)
+
+    assert out["scans_landing_on_indicator"] == 0
+    assert out["scans_redirected_away"] == 1
+    assert out["redirect_destinations"][0]["value"] == "github.com"
+    signals = out["reputation_signals"]
+    assert signals["min_apex_domain_age_days"] is None
+    assert signals["best_umbrella_rank"] is None
+    assert signals["ranked_in_umbrella"] is False
+    assert "NOT evidence of good standing" in signals["note"]
+
+
+def test_build_assessment_attributes_reputation_to_landed_scans():
+    landed = _hit(domain="sub.lzphy.top", apex_domain_age_days=6, umbrella_rank=None)
+    out = a.build_assessment("lzphy.top", "domain", [landed], days=180)
+
+    assert out["scans_landing_on_indicator"] == 1
+    assert out["reputation_signals"]["min_apex_domain_age_days"] == 6
+    assert any("very young" in s for s in out["risk_signals"])
+
+
+def test_build_assessment_hash_lookup_has_no_window():
+    out = a.build_assessment("a" * 64, "hash", [_hit()], days=180)
+    assert out["window_days"] is None
+
+
+# -- query helpers ----------------------------------------------------------
+
+
+def test_ip_query_rejects_non_ip():
+    with pytest.raises(ValueError):
+        q.ip_query("not-an-ip")
+
+
+def test_asn_query_normalises_and_rejects():
+    assert q.asn_query("15169", days=0) == "page.asn:AS15169"
+    assert q.asn_query("as15169", days=0) == "page.asn:AS15169"
+    assert q.asn_query("nonsense") == ""
+
+
+def test_domain_query_bounds_the_window():
+    assert q.domain_query("example.com", 30).endswith(" AND date:>now-30d")
