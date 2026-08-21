@@ -36,6 +36,14 @@ class ScanPending(UrlscanError):
     """The scan exists but has not finished yet. Retry, do not treat as failure."""
 
 
+class ImageTooLarge(UrlscanError):
+    """The image is past the caller's ceiling. Carries the size so the tool can say."""
+
+    def __init__(self, size_bytes: int) -> None:
+        super().__init__(f"Image is {size_bytes} bytes, past the configured ceiling.")
+        self.size_bytes = size_bytes
+
+
 class UrlscanClient:
     """Thin async client.
 
@@ -164,6 +172,42 @@ class UrlscanClient:
         if cache_key is not None:
             self._cache_write(cache_key, payload)
         return payload
+
+    async def request_bytes(
+        self, url: str, *, action: str = "Fetching an image", max_bytes: int | None = None
+    ) -> bytes:
+        """Fetch raw bytes from an absolute URL — screenshots live off /api.
+
+        Not cached: an image is orders of magnitude larger than the JSON this
+        cache is sized for, and one screenshot would evict the whole working set.
+        `max_bytes` is checked against Content-Length *before* the body is read,
+        so an oversized capture costs a header exchange rather than a download.
+        """
+        client = await self._get_client()
+        headers = {"API-Key": self.api_key} if self.api_key else {}
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.TimeoutException as exc:
+            raise UrlscanError(
+                f"urlscan.io timed out after {self._timeout:.0f}s fetching the image."
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise UrlscanError(f"Could not reach urlscan.io: {exc}") from exc
+
+        if response.status_code == 404:
+            raise ScanPending(
+                "No image at that address. A freshly submitted scan may not have "
+                "rendered yet, and a failed scan never produces one."
+            )
+        self._raise_for_status(response, action)
+
+        if max_bytes is not None:
+            declared = response.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) > max_bytes:
+                raise ImageTooLarge(int(declared))
+            if len(response.content) > max_bytes:
+                raise ImageTooLarge(len(response.content))
+        return response.content
 
     # -- cache ------------------------------------------------------------
 

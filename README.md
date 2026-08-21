@@ -4,7 +4,7 @@ An MCP server for the [urlscan.io](https://urlscan.io) API. Scan URLs, search
 the historical scan corpus, and assess indicators from Claude Code, Claude
 Desktop, Cursor, or any other MCP client.
 
-Fourteen tools. Cached reads. Python 3.10+. MIT.
+Fifteen tools. Cached reads. Sees the page. Python 3.10+. MIT.
 
 ---
 
@@ -113,6 +113,7 @@ public docs imply, which is why `server_capabilities` exists.
 | `list_available_countries` | `get_scan_result`, `get_page_dom` |
 | `assess_indicator` | `get_quotas` |
 | `get_screenshot_url` | verdicts (present in results only) |
+| `analyze_screenshot` | |
 
 Verdicts never appear in **search** responses on the free plan, key or not —
 only in individual result documents. `assess_indicator` runs on search, so it
@@ -130,7 +131,8 @@ instead. That is deliberate, and the reason is in the tool's own output.
 **Retrieval**
 - `get_scan_result` — summarised scan result (`full=True` for the raw document)
 - `get_page_dom` — captured DOM, truncated
-- `get_screenshot_url` — screenshot and report links
+- `get_screenshot_url` — screenshot and report links, for a human to open
+- `analyze_screenshot` — **the page itself**, as an image your model can read
 
 **Search**
 - `search_scans` — raw ElasticSearch query string
@@ -178,6 +180,42 @@ instead. That is deliberate, and the reason is in the tool's own output.
 
 ---
 
+## Seeing the page
+
+Every other tool returns metadata *about* a page. `analyze_screenshot` returns
+the page. Domain age and popularity rank say a site is suspicious; only looking
+at it says *this is a Microsoft 365 sign-in form* — which is the question
+someone triaging a phishing report is actually asking. It needs no API key.
+
+The model doing the looking is **your client's**, not a second vendor's. MCP
+carries images natively, so the screenshot comes back as image content and
+whatever multimodal model is driving the session reads it. No extra key, no
+extra bill, and the analysis improves when your model does.
+
+What ships with the image matters as much as the image:
+
+- **A brand is not a verdict.** A real Microsoft login page and a perfect clone
+  are the same pixels. What makes one phishing is the brand not matching the
+  domain serving it — so the domain travels with the picture and the
+  instruction says to compare them. Told only "look for phishing", a model
+  reports every login form it sees.
+- **A redirect is surfaced.** Judging the brand against the *submitted* domain
+  after a scan bounced elsewhere compares the page to a host that never served
+  it.
+- **One fetch, one country, one moment.** Cloaked pages serve scanners
+  something bland and victims something else, and a blank capture usually means
+  blocked rather than safe.
+- **The image is attacker-controlled.** Text rendered into a page can carry
+  instructions aimed at whatever reads it. The brief says so explicitly rather
+  than hoping.
+
+Install Pillow (`pip install 'urlscan-mcp[vision]'`) and full-page captures are
+cropped to the part that matters and downscaled before they reach the model — a
+1920×9000 capture goes out at roughly a fifth the bytes. Without Pillow the
+image still goes out, unmodified, with a note saying so.
+
+---
+
 ## Using it as a library, not just a server
 
 The rules that make this server's output trustworthy — *no verdict data is not
@@ -218,7 +256,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-53 offline tests — no network, no key required. They cover query escaping,
+74 offline tests — no network, no key required. They cover query escaping,
 redirector matching (`page.*` vs `task.*`), input validation, auth degradation,
 response shaping against malformed documents, and the assessment logic's
 refusal to imply safety — including `build_assessment` directly, since

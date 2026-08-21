@@ -1,6 +1,6 @@
 """MCP server for urlscan.io.
 
-Fourteen tools over the urlscan.io API, shaped for agent use: summarised
+Fifteen tools over the urlscan.io API, shaped for agent use: summarised
 responses instead of multi-megabyte JSON, honest errors, and read-only
 operation when no API key is present.
 
@@ -16,11 +16,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from . import query as q
+from . import screenshots
 from .assess import build_assessment
-from .client import ScanPending, UrlscanClient, UrlscanError
+from .client import ImageTooLarge, ScanPending, UrlscanClient, UrlscanError
 from .shaping import summarize_result, summarize_search_hit, truncate
 
 mcp = FastMCP("urlscan")
@@ -188,16 +189,66 @@ async def get_page_dom(uuid: str, max_chars: int = 20000) -> dict[str, Any]:
 
 @mcp.tool()
 async def get_screenshot_url(uuid: str) -> dict[str, Any]:
-    """Get the screenshot URL for a scan.
+    """Get the screenshot URL for a scan, as links for a human to open.
 
-    Returns a link rather than image bytes — screenshots are large and usually
-    meant for a human to open.
+    Use analyze_screenshot instead if you want to *look* at the page yourself.
     """
     return {
         "uuid": uuid,
-        "screenshot_url": f"https://urlscan.io/screenshots/{uuid}.png",
+        "screenshot_url": screenshots.SCREENSHOT_URL.format(uuid=uuid),
         "report_url": f"https://urlscan.io/result/{uuid}/",
     }
+
+
+# structured_output=False because the payload is an image plus prose, and there
+# is no JSON shape for a screenshot. Left on, FastMCP tries to serialise the
+# content blocks as structured data and the tool fails at the point of return —
+# which only shows up when something actually calls it, not in a unit test that
+# invokes the function directly.
+@mcp.tool(structured_output=False)
+async def analyze_screenshot(uuid: str) -> list[Any]:
+    """Look at what the page actually rendered. Needs no API key.
+
+    Every other tool here returns metadata *about* a page; this returns the
+    page. Domain age and popularity rank say a site is suspicious — only seeing
+    it says "this is a Microsoft 365 sign-in form", which is the question
+    someone triaging a phishing report is really asking. Reach for it whenever
+    an indicator looks suspicious and you need to know what it is pretending to
+    be, or when a verdict is unavailable and metadata alone has not settled it.
+
+    Returns the image plus the scan's identifying context, because the finding
+    is never the brand on its own: a genuine sign-in page and a perfect clone
+    are the same pixels, and what makes one phishing is that the brand does not
+    match the domain serving it. Compare the two.
+
+    Nothing renders for a scan that failed or is still running, and a blank
+    capture usually means blocked rather than safe.
+    """
+    try:
+        summary = await get_scan_result(uuid)
+        if isinstance(summary, dict) and "error" in summary:
+            # Result documents need a key; the screenshot does not. Press on
+            # with less context rather than refusing to show the page at all.
+            summary = {"uuid": uuid, "page": {}, "verdict": {}}
+    except UrlscanError:
+        summary = {"uuid": uuid, "page": {}, "verdict": {}}
+
+    try:
+        raw = await client.request_bytes(
+            screenshots.SCREENSHOT_URL.format(uuid=uuid),
+            action="Fetching a screenshot",
+            max_bytes=screenshots.MAX_IMAGE_BYTES,
+        )
+    except ImageTooLarge as exc:
+        return [screenshots.too_large_message(exc.size_bytes)]
+    except ScanPending as exc:
+        return [f"No screenshot for {uuid}: {exc}"]
+    except UrlscanError as exc:
+        return [f"Could not fetch the screenshot for {uuid}: {exc}"]
+
+    prepared, note = screenshots.prepare(raw)
+    brief = screenshots.analysis_brief(summary)
+    return [f"{brief}\n\n({note})", Image(data=prepared, format="png")]
 
 
 # --------------------------------------------------------------------------

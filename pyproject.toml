@@ -12,7 +12,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pillow>=10.0"]
+# analyze_screenshot works without this — Pillow only downscales and crops the
+# capture so a tall page does not spend the model's context on whitespace.
+vision = ["pillow>=10.0"]
 
 [project.scripts]
 urlscan-mcp = "urlscan_mcp.server:main"
