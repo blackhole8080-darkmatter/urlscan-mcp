@@ -170,6 +170,39 @@ instead. That is deliberate, and the reason is in the tool's own output.
 
 ---
 
+## Using it as a library, not just a server
+
+The rules that make this server's output trustworthy — *no verdict data is not
+a clean verdict*, and *only scans that landed on the indicator may lend it
+their reputation* — are worth more than the transport around them. They live in
+two modules that import no `mcp` and perform no I/O:
+
+- `urlscan_mcp.query` — indicator classification and ElasticSearch query
+  construction, including the `(page.X OR task.X)` redirector matching.
+- `urlscan_mcp.assess` — `build_assessment()`, which turns shaped search hits
+  into the same dictionary `assess_indicator` returns.
+
+So an application with its own HTTP stack — its own cache, rate limiting and
+failure isolation — can reach the same conclusions without either running a
+subprocess or reimplementing the judgment:
+
+```python
+from urlscan_mcp import query, assess
+from urlscan_mcp.shaping import summarize_search_hit
+
+kind, q = query.classify("lzphy.top")
+raw = my_http.get_json(f"https://urlscan.io/api/v1/search/?q={q}&size=100")
+hits = [summarize_search_hit(h) for h in raw["results"]]
+
+report = assess.build_assessment("lzphy.top", kind, hits, days=180)
+```
+
+[DEEP](https://github.com/blackhole8080-darkmatter/DEEP) consumes it exactly
+this way, alongside running this server over stdio — the two paths share one
+implementation of the analysis rather than drifting apart.
+
+---
+
 ## Development
 
 ```bash
@@ -177,10 +210,11 @@ pip install -e ".[dev]"
 pytest
 ```
 
-35 offline tests — no network, no key required. They cover query escaping,
-redirector matching (`page.*` vs `task.*`),
-input validation, auth degradation, response shaping against malformed
-documents, and the assessment logic's refusal to imply safety.
+44 offline tests — no network, no key required. They cover query escaping,
+redirector matching (`page.*` vs `task.*`), input validation, auth degradation,
+response shaping against malformed documents, and the assessment logic's
+refusal to imply safety — including `build_assessment` directly, since
+embedding applications depend on those guarantees too.
 
 ---
 

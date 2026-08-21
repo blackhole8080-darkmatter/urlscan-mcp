@@ -1,62 +1,33 @@
 """MCP server for urlscan.io.
 
-Thirteen tools over the urlscan.io API, shaped for agent use: summarised
+Fourteen tools over the urlscan.io API, shaped for agent use: summarised
 responses instead of multi-megabyte JSON, honest errors, and read-only
 operation when no API key is present.
+
+This module is the MCP transport and nothing else. Query construction lives in
+``query.py`` and the reputation analysis in ``assess.py``, both of which import
+no ``mcp`` and perform no I/O, so an application embedding urlscan.io through
+its own HTTP stack reaches the same conclusions as this server rather than
+reimplementing them.
 """
 
 from __future__ import annotations
 
 import asyncio
-import ipaddress
-import re
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from . import query as q
+from .assess import build_assessment
 from .client import ScanPending, UrlscanClient, UrlscanError
 from .shaping import summarize_result, summarize_search_hit, truncate
 
 mcp = FastMCP("urlscan")
 client = UrlscanClient()
 
-# ES query-string reserved characters. Anything user-supplied gets escaped
-# before it is interpolated into a query, so a domain containing a hyphen or a
-# colon cannot silently change the query's meaning.
-_RESERVED = r'+-=&|><!(){}[]^"~*?:\/'
-
-
-def _escape(value: str) -> str:
-    return "".join(f"\\{c}" if c in _RESERVED else c for c in value)
-
-
 def _fail(exc: Exception) -> dict[str, Any]:
     return {"error": str(exc)}
-
-
-def _time_filter(days: int | None) -> str:
-    if not days or days <= 0:
-        return ""
-    return f" AND date:>now-{int(days)}d"
-
-
-def _submitted_or_final(field: str, value: str, quoted: bool = False) -> str:
-    """Match both what was submitted and where the scan actually landed.
-
-    urlscan records the submitted URL under `task.*` and the final,
-    post-redirect page under `page.*`. Querying `page.*` alone silently misses
-    every domain that redirects away — which is precisely what link shorteners,
-    phishing redirectors and traffic distribution systems do. Verified against
-    the live API: `page.domain:lzphy.top` returns 0 hits while
-    `task.domain:lzphy.top` returns the scan, because the page redirected to
-    github.com.
-
-    Reporting "no scans found" for an indicator that has been scanned is the
-    same class of error as reading a missing verdict as "clean": it turns a gap
-    in the query into an apparent absence of findings.
-    """
-    rendered = f'"{value}"' if quoted else _escape(value)
-    return f"(page.{field}:{rendered} OR task.{field}:{rendered})"
 
 
 # --------------------------------------------------------------------------
@@ -283,8 +254,7 @@ async def search_by_domain(
     Matches both scans that landed on the domain and scans that were pointed at
     it but redirected elsewhere.
     """
-    query = f"{_submitted_or_final('domain', domain)}{_time_filter(days)}"
-    return await _search(query, size)
+    return await _search(q.domain_query(domain, days), size)
 
 
 @mcp.tool()
@@ -294,22 +264,18 @@ async def search_by_ip(ip: str, days: int = 90, size: int = 20) -> dict[str, Any
     Good for spotting what else is hosted alongside something suspicious.
     """
     try:
-        ipaddress.ip_address(ip)
+        query = q.ip_query(ip, days)
     except ValueError:
         return {"error": f"'{ip}' is not a valid IP address."}
-    query = f"page.ip:{_escape(ip)}{_time_filter(days)}"
     return await _search(query, size)
 
 
 @mcp.tool()
 async def search_by_asn(asn: str, days: int = 30, size: int = 20) -> dict[str, Any]:
     """Find recent scans hosted within an autonomous system, e.g. 'AS15169'."""
-    normalised = asn.upper()
-    if not normalised.startswith("AS"):
-        normalised = f"AS{normalised}"
-    if not re.fullmatch(r"AS\d+", normalised):
+    query = q.asn_query(asn, days)
+    if not query:
         return {"error": f"'{asn}' is not a valid ASN. Expected a form like AS15169."}
-    query = f"page.asn:{normalised}{_time_filter(days)}"
     return await _search(query, size)
 
 
@@ -320,9 +286,9 @@ async def search_by_hash(sha256: str, size: int = 20) -> dict[str, Any]:
     Pivots from one known-bad file to every other page serving it — often the
     fastest way to map a campaign.
     """
-    if not re.fullmatch(r"[A-Fa-f0-9]{64}", sha256.strip()):
+    if not q.is_sha256(sha256):
         return {"error": "Expected a 64-character hex SHA-256 hash."}
-    return await _search(f"hash:{sha256.strip().lower()}", size)
+    return await _search(q.hash_query(sha256), size)
 
 
 # --------------------------------------------------------------------------
@@ -384,51 +350,6 @@ async def server_capabilities() -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def _partition_by_landing(
-    indicator: str, kind: str, results: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split scans into those that landed on the indicator and those that left.
-
-    Matching `task.domain` as well as `page.domain` finds redirectors, but the
-    page.* fields of a redirected scan describe wherever it ended up. Reading
-    apex domain age or Umbrella rank off those would credit the indicator with
-    the destination's reputation — reporting a day-old throwaway domain as a
-    decade-old top-1500 site because it bounced to github.com.
-
-    Only domain lookups can be partitioned meaningfully; for IP, URL and hash
-    lookups every result is treated as landed, which is the previous behaviour.
-    """
-    if kind != "domain":
-        return list(results), []
-
-    target = indicator.strip().lower().lstrip(".")
-    landed: list[dict[str, Any]] = []
-    redirected: list[dict[str, Any]] = []
-    for r in results:
-        page_domain = (r.get("domain") or "").lower()
-        if page_domain == target or page_domain.endswith(f".{target}"):
-            landed.append(r)
-        else:
-            redirected.append(r)
-    return landed, redirected
-
-
-def _classify(indicator: str) -> tuple[str, str] | None:
-    value = indicator.strip()
-    if re.fullmatch(r"[A-Fa-f0-9]{64}", value):
-        return "hash", f"hash:{value.lower()}"
-    try:
-        ipaddress.ip_address(value)
-        return "ip", f"page.ip:{_escape(value)}"
-    except ValueError:
-        pass
-    if value.lower().startswith(("http://", "https://")):
-        return "url", _submitted_or_final("url", value, quoted=True)
-    if re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value):
-        return "domain", _submitted_or_final("domain", value)
-    return None
-
-
 @mcp.tool()
 async def assess_indicator(indicator: str, days: int = 180) -> dict[str, Any]:
     """Build a reputation picture for a domain, IP, URL or SHA-256 hash.
@@ -442,246 +363,25 @@ async def assess_indicator(indicator: str, days: int = 180) -> dict[str, Any]:
     answers "should I care about this?" instead of returning a scan document.
     Read the caveats field before acting on the result.
     """
-    classified = _classify(indicator)
+    classified = q.classify(indicator)
     if classified is None:
         return {
             "error": f"Could not classify '{indicator}'. Expected a domain, IP "
             "address, URL, or SHA-256 hash."
         }
     kind, base_query = classified
-    query = base_query + (_time_filter(days) if kind != "hash" else "")
+    query = base_query + (q.time_filter(days) if kind != "hash" else "")
 
     found = await _search(query, size=100)
     if "error" in found:
         return found
 
-    results = found["results"]
-    if not results:
-        return {
-            "indicator": indicator,
-            "type": kind,
-            "scans_found": 0,
-            "assessment": "No urlscan.io scans found in the selected window.",
-            "caveats": [
-                "Absence of scans is not evidence of safety — it usually just "
-                "means nobody has submitted this indicator.",
-            ],
-        }
-
-    # Scans reached via task.* may have landed on a completely different site.
-    # Their page.* fields — apex domain age, Umbrella rank, hosting ASN —
-    # describe the DESTINATION, not the indicator asked about. Attributing them
-    # to the indicator would report a throwaway redirector as a decade-old
-    # top-ranked domain, which is a worse failure than saying nothing: it
-    # manufactures reputation rather than merely withholding a verdict.
-    landed, redirected = _partition_by_landing(indicator, kind, results)
-    signal_source = landed if landed else []
-
-    scores = [r["verdict_score"] for r in results if isinstance(r["verdict_score"], (int, float))]
-    flagged = [r for r in results if r.get("malicious") is True]
-    # The free search tier omits verdicts entirely. Distinguishing "no verdict
-    # data" from "verdicts say clean" is the whole point — conflating them
-    # would make this tool confidently wrong about malicious indicators.
-    verdicts_available = bool(scores) or any(r.get("malicious") is not None for r in results)
-
-    tags = _tally(tag for r in results for tag in (r.get("tags") or []))
-    times = sorted(r["scanned_at"] for r in results if r.get("scanned_at"))
-    domains = _tally(r["domain"] for r in results if r.get("domain"))
-
-    # Hosting and reputation are read only from scans that actually landed on
-    # the indicator. See _partition_by_landing.
-    countries = _tally(r["country"] for r in signal_source if r.get("country"))
-    asns = _tally(r["asn_name"] for r in signal_source if r.get("asn_name"))
-    ages = [r["apex_domain_age_days"] for r in signal_source if isinstance(r.get("apex_domain_age_days"), int)]
-    ranks = [r["umbrella_rank"] for r in signal_source if isinstance(r.get("umbrella_rank"), int)]
-
-    verdicts: dict[str, Any] = {"available": verdicts_available}
-    if verdicts_available:
-        verdicts.update(
-            {
-                "flagged_malicious": len(flagged),
-                "malicious_ratio": round(len(flagged) / len(results), 3),
-                "max_score": max(scores) if scores else None,
-                "mean_score": round(sum(scores) / len(scores), 1) if scores else None,
-            }
-        )
-    else:
-        verdicts["note"] = (
-            "The urlscan.io search API does not return verdict data on this plan, "
-            "with or without an API key. It does NOT mean the indicator is clean. "
-            "Call get_scan_result on a specific uuid for that scan's verdict."
-        )
-
-    return {
-        "indicator": indicator,
-        "type": kind,
-        "window_days": days if kind != "hash" else None,
-        "scans_found": len(results),
-        "total_matching": found.get("total"),
-        "first_seen": times[0] if times else None,
-        "last_seen": times[-1] if times else None,
-        "verdicts": verdicts,
-        "scans_landing_on_indicator": len(landed),
-        "scans_redirected_away": len(redirected),
-        "redirect_destinations": _tally(
-            r["domain"] for r in redirected if r.get("domain")
-        )[:10],
-        "reputation_signals": {
-            "derived_from_scans": len(signal_source),
-            "min_apex_domain_age_days": min(ages) if ages else None,
-            "best_umbrella_rank": min(ranks) if ranks else None,
-            "ranked_in_umbrella": bool(ranks),
-            "distinct_hosting_countries": len(countries),
-            "distinct_asns": len(asns),
-            **(
-                {
-                    "note": "Every scan of this indicator redirected elsewhere, so "
-                    "no reputation signal can be attributed to it. The values above "
-                    "are empty by design — they are NOT evidence of good standing. "
-                    "See redirect_destinations."
-                }
-                if not landed
-                else {}
-            ),
-        },
-        "risk_signals": _risk_signals(ages, ranks, tags, flagged, scores),
-        "recurring_tags": tags[:10],
-        "hosting_countries": countries[:10],
-        "hosting_asns": asns[:10],
-        "related_domains": domains[:10] if kind != "domain" else [],
-        "assessment": _assessment_sentence(
-            kind, len(results), flagged, scores, verdicts_available, ages, ranks
-        ),
-        "sample_scans": [
-            {
-                "uuid": r["uuid"],
-                "url": r["url"],
-                "scanned_at": r["scanned_at"],
-                "score": r["verdict_score"],
-            }
-            for r in results[:5]
-        ],
-        "caveats": [
-            "Absence of a malicious verdict is not evidence of safety.",
-            "urlscan.io verdicts are heuristic and community-influenced, not ground truth.",
-            "A low scan count means low visibility, not low risk.",
-            "Shared hosting means co-located indicators are frequently unrelated.",
-            "Scans reflect what the page served to that scanner, at that time, from "
-            "that country — cloaked pages routinely serve something else.",
-        ],
-    }
-
-
-def _risk_signals(
-    ages: list[int],
-    ranks: list[int],
-    tags: list[dict[str, Any]],
-    flagged: list[dict[str, Any]],
-    scores: list[float],
-) -> list[str]:
-    """Observable signals, available even when verdict data is not.
-
-    Domain age and popularity rank catch freshly-registered phishing that no
-    verdict engine has scored yet — which is most of it, at the point it
-    matters.
-    """
-    signals: list[str] = []
-    if ages:
-        youngest = min(ages)
-        if youngest < 30:
-            signals.append(f"Apex domain is very young ({youngest} days) — common in phishing.")
-        elif youngest < 180:
-            signals.append(f"Apex domain is relatively new ({youngest} days).")
-    if not ranks:
-        signals.append("Not present in the Umbrella popularity ranking — no established traffic.")
-    tag_values = {t["value"].lower() for t in tags}
-    for marker in ("phishing", "malicious", "malware", "credential", "scam"):
-        if any(marker in t for t in tag_values):
-            signals.append(f"Submitters tagged scans with '{marker}'.")
-            break
-    if flagged:
-        signals.append(f"{len(flagged)} scan(s) carry an explicit malicious verdict.")
-    if scores and max(scores) >= 50:
-        signals.append(f"Peak verdict score {max(scores)}.")
-    return signals
-
-
-def _assessment_sentence(
-    kind: str,
-    total: int,
-    flagged: list[dict[str, Any]],
-    scores: list[float],
-    verdicts_available: bool,
-    ages: list[int],
-    ranks: list[int],
-) -> str:
-    if flagged or (scores and max(scores) >= 40):
-        ratio = len(flagged) / total if total else 0
-        peak = max(scores) if scores else "n/a"
-        strength = "Strong" if ratio >= 0.5 or (scores and max(scores) >= 70) else "Moderate"
-        return (
-            f"{strength} negative signal: {len(flagged)} of {total} scans "
-            f"({ratio:.0%}) flagged malicious, peak verdict score {peak}. "
-            "Review the sample scans before acting."
-        )
-
-    young = ages and min(ages) < 30
-    unranked = not ranks
-    if young or unranked:
-        parts = []
-        if young:
-            parts.append(f"the apex domain is only {min(ages)} days old")
-        if unranked:
-            parts.append("it has no Umbrella popularity ranking")
-        joined = " and ".join(parts)
-        return (
-            f"No malicious verdict across {total} scan(s), but {joined}. "
-            "Treat as unproven rather than benign."
-        )
-
-    if not verdicts_available:
-        return (
-            f"{total} scan(s) found for this {kind}. The search API returned no "
-            "verdict data, so this is a record of observation only — it says nothing "
-            "about whether the indicator is malicious. Use get_scan_result on one of "
-            "the sample scans for a verdict."
-        )
-
-    return (
-        f"{total} scan(s) found for this {kind}; none carried a malicious verdict, "
-        "and the domain is established. Weak positive evidence, not a clean bill of health."
-    )
-
-
-def _tally(values: Any) -> list[dict[str, Any]]:
-    counts: dict[str, int] = {}
-    for value in values:
-        counts[value] = counts.get(value, 0) + 1
-    return [
-        {"value": k, "count": v}
-        for k, v in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
-    ]
-
-
-def _verdict_sentence(
-    kind: str, total: int, malicious: int, ratio: float, scores: list[float]
-) -> str:
-    if malicious == 0:
-        return (
-            f"{total} scan(s) found for this {kind}; none were flagged malicious. "
-            "That is weak positive evidence, not a clean bill of health."
-        )
-    high = max(scores) if scores else 0
-    if ratio >= 0.5 or high >= 70:
-        strength = "Strong"
-    elif ratio >= 0.2 or high >= 40:
-        strength = "Moderate"
-    else:
-        strength = "Weak"
-    return (
-        f"{strength} negative signal: {malicious} of {total} scans "
-        f"({ratio:.0%}) were flagged malicious, peak verdict score {high}. "
-        "Review the sample scans before acting."
+    return build_assessment(
+        indicator,
+        kind,
+        found["results"],
+        days=days,
+        total_matching=found.get("total"),
     )
 
 
