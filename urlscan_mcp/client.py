@@ -7,7 +7,9 @@ network failure all become clear, actionable messages rather than tracebacks.
 
 from __future__ import annotations
 
+import json
 import os
+import time
 from typing import Any
 
 import httpx
@@ -15,6 +17,15 @@ import httpx
 BASE_URL = "https://urlscan.io"
 USER_AGENT = "urlscan-mcp/0.1 (+https://github.com/)"
 DEFAULT_TIMEOUT = 30.0
+
+#: How long a GET response stays reusable. Scans are immutable once written and
+#: the corpus moves slowly, so an hour costs nothing in freshness and spares the
+#: free tier: an agent pivoting around one investigation asks the same question
+#: repeatedly, and without this every repeat is a request.
+DEFAULT_CACHE_TTL = 3600.0
+
+#: Bounded so a long-lived server cannot grow a cache without limit.
+MAX_CACHE_ENTRIES = 256
 
 
 class UrlscanError(Exception):
@@ -35,10 +46,18 @@ class UrlscanClient:
     available so the caller never has to guess.
     """
 
-    def __init__(self, api_key: str | None = None, timeout: float = DEFAULT_TIMEOUT):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        cache_ttl: float = DEFAULT_CACHE_TTL,
+    ):
         self.api_key = api_key if api_key is not None else os.getenv("URLSCAN_API_KEY")
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
+        self._cache_ttl = cache_ttl
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self.cache_stats = {"hits": 0, "misses": 0}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -104,6 +123,18 @@ class UrlscanClient:
         client = await self._get_client()
         headers = self._headers(require_key, action)
 
+        # Only GETs are cached, and only successful ones (an exception exits
+        # before the store below). A POST here is a scan submission: replaying
+        # a cached response would hand back a scan id for a scan that never
+        # ran, which is worse than the request it saves.
+        cache_key = (
+            self._cache_key(path, params) if method.upper() == "GET" else None
+        )
+        if cache_key is not None:
+            hit = self._cache_read(cache_key)
+            if hit is not None:
+                return hit
+
         try:
             response = await client.request(
                 method, path, params=params, json=json, headers=headers
@@ -119,15 +150,52 @@ class UrlscanClient:
         self._raise_for_status(response, action)
 
         if not expect_json:
+            if cache_key is not None:
+                self._cache_write(cache_key, response.text)
             return response.text
 
         try:
-            return response.json()
+            payload = response.json()
         except ValueError as exc:
             raise UrlscanError(
                 f"urlscan.io returned a non-JSON response (HTTP {response.status_code}) "
                 f"for {path}."
             ) from exc
+        if cache_key is not None:
+            self._cache_write(cache_key, payload)
+        return payload
+
+    # -- cache ------------------------------------------------------------
+
+    @staticmethod
+    def _cache_key(path: str, params: dict[str, Any] | None) -> str:
+        # sort_keys so parameter order cannot split one question into two
+        # entries; callers build these dicts in whatever order reads well.
+        return f"{path}?{json.dumps(params or {}, sort_keys=True, default=str)}"
+
+    def _cache_read(self, key: str) -> Any | None:
+        entry = self._cache.get(key)
+        if entry is None:
+            self.cache_stats["misses"] += 1
+            return None
+        expires_at, value = entry
+        if expires_at <= time.monotonic():
+            self._cache.pop(key, None)
+            self.cache_stats["misses"] += 1
+            return None
+        self.cache_stats["hits"] += 1
+        return value
+
+    def _cache_write(self, key: str, value: Any) -> None:
+        if self._cache_ttl <= 0:
+            return
+        if len(self._cache) >= MAX_CACHE_ENTRIES:
+            oldest = min(self._cache, key=lambda k: self._cache[k][0])
+            self._cache.pop(oldest, None)
+        self._cache[key] = (time.monotonic() + self._cache_ttl, value)
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
 
     def _raise_for_status(self, response: httpx.Response, action: str) -> None:
         status = response.status_code

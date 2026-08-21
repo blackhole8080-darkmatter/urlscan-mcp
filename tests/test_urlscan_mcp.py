@@ -381,3 +381,138 @@ def test_asn_query_normalises_and_rejects():
 
 def test_domain_query_bounds_the_window():
     assert q.domain_query("example.com", 30).endswith(" AND date:>now-30d")
+
+
+# -- caching and sampling ---------------------------------------------------
+#
+# Every MCP client call used to hit the API. An agent pivoting around one
+# investigation asks the same question repeatedly, so the free tier was being
+# spent on answers already known. What must NOT be cached matters more.
+
+
+class _FakeResponse:
+    def __init__(self, payload, status=200, text=""):
+        self.status_code = status
+        self._payload = payload
+        self.text = text
+        self.headers = {}
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+class _CountingClient:
+    """Stands in for httpx.AsyncClient, counting real requests."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.requests = []
+        self.is_closed = False
+
+    async def request(self, method, path, params=None, json=None, headers=None):
+        self.requests.append((method, path, params))
+        return _FakeResponse(self.payload)
+
+    async def aclose(self):
+        self.is_closed = True
+
+
+async def _client_with(counting, **kwargs):
+    client = UrlscanClient(api_key="k", **kwargs)
+    client._client = counting
+    return client
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_get_is_served_from_cache():
+    counting = _CountingClient({"results": []})
+    client = await _client_with(counting)
+
+    first = await client.request("GET", "/api/v1/search/", params={"q": "a"})
+    second = await client.request("GET", "/api/v1/search/", params={"q": "a"})
+
+    assert first == second
+    assert len(counting.requests) == 1
+    assert client.cache_stats["hits"] == 1
+
+
+@pytest.mark.asyncio
+async def test_parameter_order_does_not_split_the_cache():
+    counting = _CountingClient({"ok": True})
+    client = await _client_with(counting)
+
+    await client.request("GET", "/x", params={"a": 1, "b": 2})
+    await client.request("GET", "/x", params={"b": 2, "a": 1})
+
+    assert len(counting.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_submission_is_never_served_from_cache():
+    """Replaying one would hand back a scan id for a scan that never ran."""
+    counting = _CountingClient({"uuid": "u1"})
+    client = await _client_with(counting)
+
+    await client.request("POST", "/api/v1/scan/", json={"url": "https://x.test"})
+    await client.request("POST", "/api/v1/scan/", json={"url": "https://x.test"})
+
+    assert len(counting.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_expired_entry_is_refetched():
+    counting = _CountingClient({"ok": True})
+    client = await _client_with(counting, cache_ttl=-1)
+
+    await client.request("GET", "/x")
+    await client.request("GET", "/x")
+
+    assert len(counting.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_cache_is_bounded():
+    from urlscan_mcp.client import MAX_CACHE_ENTRIES
+
+    counting = _CountingClient({"ok": True})
+    client = await _client_with(counting)
+    for i in range(MAX_CACHE_ENTRIES + 20):
+        await client.request("GET", "/x", params={"i": i})
+
+    assert len(client._cache) <= MAX_CACHE_ENTRIES
+
+
+@pytest.mark.asyncio
+async def test_caching_can_be_switched_off():
+    counting = _CountingClient({"ok": True})
+    client = await _client_with(counting, cache_ttl=0)
+
+    await client.request("GET", "/x")
+    await client.request("GET", "/x")
+
+    assert len(counting.requests) == 2
+
+
+def test_a_sampled_assessment_says_so():
+    """A sample presented as a total is the same error as a missing verdict
+    presented as clean."""
+    hits = [_hit(uuid=f"u{i}") for i in range(100)]
+    out = a.build_assessment("evil.test", "domain", hits, days=180, total_matching=4200)
+
+    assert out["sampled"] is True
+    assert "100 most recent of 4200" in out["sampling_note"]
+
+
+def test_a_complete_assessment_carries_no_sampling_note():
+    out = a.build_assessment("evil.test", "domain", [_hit()], days=180, total_matching=1)
+
+    assert out["sampled"] is False
+    assert "sampling_note" not in out
+
+
+def test_an_unknown_total_is_not_claimed_as_complete():
+    """urlscan omits `total` sometimes; absent is not the same as 'all of it'."""
+    out = a.build_assessment("evil.test", "domain", [_hit()], days=180, total_matching=None)
+    assert out["sampled"] is False

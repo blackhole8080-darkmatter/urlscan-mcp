@@ -4,7 +4,7 @@ An MCP server for the [urlscan.io](https://urlscan.io) API. Scan URLs, search
 the historical scan corpus, and assess indicators from Claude Code, Claude
 Desktop, Cursor, or any other MCP client.
 
-Fourteen tools. Python 3.10+. MIT.
+Fourteen tools. Cached reads. Python 3.10+. MIT.
 
 ---
 
@@ -16,7 +16,7 @@ result document is frequently **several megabytes**: every request, every
 response header, every cookie. Handed to a model verbatim it swallows the
 context window and buries the handful of facts anyone wanted.
 
-This server is built around four decisions:
+This server is built around five decisions:
 
 1. **Responses are shaped, not forwarded.** Every tool returns a summary built
    for a model to reason over. The raw document stays one `full=True` away.
@@ -32,7 +32,15 @@ This server is built around four decisions:
    this one distinguishes *no data* from *no findings*, everywhere, and falls
    back to signals it can actually observe: apex domain age, Umbrella
    popularity rank, and submitter tags.
-4. **Domain and URL lookups match redirectors.** urlscan records the submitted
+4. **Reads are cached, and a sample says it is one.** Scans are immutable once
+   written, so GETs are held for an hour — an agent pivoting around one
+   investigation asks the same question repeatedly, and the free tier should
+   not be spent on answers already known. Submissions are never cached:
+   replaying one would hand back a scan id for a scan that never ran. And when
+   more scans match than the API's 100-per-page cap returns, `assess_indicator`
+   sets `sampled` and says so, because a sample presented as a total is the
+   same class of error as a missing verdict presented as clean.
+5. **Domain and URL lookups match redirectors.** urlscan records the submitted
    URL under `task.*` and the final, post-redirect page under `page.*`.
    Querying `page.*` alone — which is what the obvious implementation does —
    silently misses every domain that redirects away, and redirecting away is
@@ -210,7 +218,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-44 offline tests — no network, no key required. They cover query escaping,
+53 offline tests — no network, no key required. They cover query escaping,
 redirector matching (`page.*` vs `task.*`), input validation, auth degradation,
 response shaping against malformed documents, and the assessment logic's
 refusal to imply safety — including `build_assessment` directly, since

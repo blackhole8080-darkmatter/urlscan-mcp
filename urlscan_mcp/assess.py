@@ -245,12 +245,28 @@ def build_assessment(
     else:
         verdicts["note"] = NO_VERDICT_NOTE
 
+    # The API caps a page at 100, which is what a caller reads. When more scans
+    # match than were read, every figure below describes a sample — and a
+    # sample presented as a total is the same class of error as a missing
+    # verdict presented as clean, so it is stated rather than left to be
+    # inferred from two numbers that happen to differ.
+    sampled = (
+        isinstance(total_matching, int) and total_matching > len(results)
+    )
+
     return {
         "indicator": indicator,
         "type": kind,
         "window_days": days if kind != "hash" else None,
         "scans_found": len(results),
         "total_matching": total_matching,
+        "sampled": sampled,
+        **({"sampling_note": (
+            f"Read the {len(results)} most recent of {total_matching} matching "
+            "scans. Counts, ratios and hosting spread below describe that sample, "
+            "not the full history — narrow the window with `days` for a more "
+            "representative slice."
+        )} if sampled else {}),
         "first_seen": times[0] if times else None,
         "last_seen": times[-1] if times else None,
         "verdicts": verdicts,
