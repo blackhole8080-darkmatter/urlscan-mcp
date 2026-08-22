@@ -256,6 +256,12 @@ pip install -e ".[dev]"
 pytest
 ```
 
+A live check is `python live_check.py [domain-or-url]` — it exercises what
+offline tests cannot: real search reachability, whether `total` comes back so
+the sampling note fires, real screenshot dimensions and byte sizes, and whether
+the downscale thresholds suit real captures. No key needed for the search and
+screenshot parts.
+
 74 offline tests — no network, no key required. They cover query escaping,
 redirector matching (`page.*` vs `task.*`), input validation, auth degradation,
 response shaping against malformed documents, and the assessment logic's
