@@ -207,7 +207,7 @@ async def get_screenshot_url(uuid: str) -> dict[str, Any]:
 # which only shows up when something actually calls it, not in a unit test that
 # invokes the function directly.
 @mcp.tool(structured_output=False)
-async def analyze_screenshot(uuid: str) -> list[Any]:
+async def analyze_screenshot(uuid: str, domain: str = "") -> list[Any]:
     """Look at what the page actually rendered. Needs no API key.
 
     Every other tool here returns metadata *about* a page; this returns the
@@ -221,6 +221,13 @@ async def analyze_screenshot(uuid: str) -> list[Any]:
     is never the brand on its own: a genuine sign-in page and a perfect clone
     are the same pixels, and what makes one phishing is that the brand does not
     match the domain serving it. Compare the two.
+
+    Pass `domain` when you already know which host you are investigating. The
+    scan's own domain comes from its result document, which needs an API key
+    while the screenshot does not — so without either, the brief has no domain
+    to compare the brand against and says so rather than inviting a comparison
+    against nothing. A domain you supply is labelled as your claim, not as the
+    scan's record.
 
     Nothing renders for a scan that failed or is still running, and a blank
     capture usually means blocked rather than safe.
@@ -248,7 +255,7 @@ async def analyze_screenshot(uuid: str) -> list[Any]:
         return [f"Could not fetch the screenshot for {uuid}: {exc}"]
 
     prepared, note = screenshots.prepare(raw)
-    brief = screenshots.analysis_brief(summary)
+    brief = screenshots.analysis_brief(summary, claimed_domain=domain)
     return [f"{brief}\n\n({note})", Image(data=prepared, format="png")]
 
 

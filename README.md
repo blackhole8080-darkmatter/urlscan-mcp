@@ -209,6 +209,13 @@ What ships with the image matters as much as the image:
 - **A redirect is surfaced.** Judging the brand against the *submitted* domain
   after a scan bounced elsewhere compares the page to a host that never served
   it.
+- **With no domain, the comparison is refused rather than faked.** The scan's
+  domain comes from its result document, which needs a key — the screenshot
+  does not. Keyless, the brief used to ask whether the brand matched "unknown",
+  and a model answers that anyway. It now says the comparison cannot be made
+  and names the two ways to close it. Pass `domain=` if you already know which
+  host you are investigating; it travels marked as your claim, not the scan's
+  record.
 - **One fetch, one country, one moment.** Cloaked pages serve scanners
   something bland and victims something else, and a blank capture usually means
   blocked rather than safe.
@@ -271,7 +278,7 @@ screenshot parts. It is itself covered by `tests/test_live_check.py`, which
 drives it against a local stand-in — a script whose whole purpose is to be run
 rarely, by hand, is the one most likely to have rotted by the time you run it.
 
-81 offline tests — no network, no key required. They cover query escaping,
+84 offline tests — no network, no key required. They cover query escaping,
 redirector matching (`page.*` vs `task.*`), input validation, auth degradation,
 response shaping against malformed documents, and the assessment logic's
 refusal to imply safety — including `build_assessment` directly, since

@@ -56,23 +56,82 @@ TARGET_WIDTH = 1024
 MAX_ASPECT_RATIO = 2.5
 
 
-def analysis_brief(summary: dict[str, Any]) -> str:
+def _brand_question(domain: str, verified: bool) -> str:
+    """Step 2 of the brief, phrased for how much is actually known.
+
+    With no domain the honest instruction is to stop, not to guess: a model
+    asked whether a brand matches "unknown" answers anyway, and the answer is
+    worthless in whichever direction it lands.
+    """
+    if verified:
+        return (
+            f"  2. Does that brand match the domain it is served from — {domain}? "
+            "This comparison IS the finding. A genuine sign-in page and a perfect "
+            "clone are identical pixels; what makes one phishing is the mismatch. "
+            "Do not call a login form malicious merely for being a login form."
+        )
+    if domain:
+        return (
+            f"  2. Does that brand match {domain} — the domain the caller says "
+            "this is? This comparison IS the finding, but note the domain was not "
+            "read from the scan record, so say you are relying on it. A genuine "
+            "sign-in page and a perfect clone are identical pixels; what makes one "
+            "phishing is the mismatch. Do not call a login form malicious merely "
+            "for being a login form."
+        )
+    return (
+        "  2. The serving domain is unavailable here, so the brand-versus-domain "
+        "comparison — the comparison that IS the finding — cannot be made from "
+        "this image alone. Report the brand you see and say explicitly that it "
+        "has not been checked against a domain. Do NOT call the page phishing "
+        "for showing a login form, and do NOT call it legitimate for looking "
+        "well made: both are conclusions this evidence does not support. To "
+        "close it, compare the brand against the domain you already hold for "
+        "this indicator, or set URLSCAN_API_KEY so the scan record can be read."
+    )
+
+
+def analysis_brief(summary: dict[str, Any], *, claimed_domain: str = "") -> str:
     """The text that travels with the image.
 
     Written as an instruction to the reader rather than a description of the
     file, because the failure this guards against is a model looking at a login
     form and calling it phishing without ever checking whose domain it is on.
+
+    That instruction needs a domain, and the scan's own domain comes from the
+    result document — which requires an API key, while the screenshot does not.
+    In the keyless configuration this server otherwise supports, the brief
+    would ask "does the brand match unknown?", which is the exact question that
+    makes a model call every login form phishing. So: ``claimed_domain`` lets a
+    caller that already knows which indicator it is investigating supply it,
+    marked as its claim rather than the scan's record; and with neither, the
+    brief says the comparison cannot be made here instead of inviting one
+    against nothing.
     """
     page = summary.get("page") or {}
-    domain = page.get("domain") or "unknown"
+    verified_domain = page.get("domain") or ""
+    domain = verified_domain or (claimed_domain or "").strip()
+    # A domain the caller asserted is evidence about the caller's intent, not
+    # about this scan. Saying which is which keeps a wrong argument from
+    # becoming a confident finding.
+    domain_is_verified = bool(verified_domain)
     final_url = summary.get("final_url") or summary.get("submitted_url") or "unknown"
     submitted = summary.get("submitted_url")
     verdict = summary.get("verdict") or {}
 
-    lines = [
-        f"Screenshot of {final_url}",
-        f"  served from domain: {domain}",
-    ]
+    lines = [f"Screenshot of {final_url}"]
+    if domain_is_verified:
+        lines.append(f"  served from domain: {domain}")
+    elif domain:
+        lines.append(
+            f"  domain (supplied by the caller, NOT confirmed against this scan's "
+            f"record): {domain}"
+        )
+    else:
+        lines.append(
+            "  served from domain: could not be determined — the scan's result "
+            "document needs an API key and the screenshot does not."
+        )
     if submitted and submitted != final_url:
         lines.append(f"  originally submitted: {submitted}  (this scan redirected)")
     if page.get("title"):
@@ -90,10 +149,7 @@ def analysis_brief(summary: dict[str, Any]) -> str:
         "Read the image and answer these, in this order:",
         "  1. Whose brand does this page present itself as? (logo, wordmark, "
         "colour scheme, product name, copyright line)",
-        f"  2. Does that brand match the domain it is served from — {domain}? "
-        "This comparison IS the finding. A genuine sign-in page and a perfect "
-        "clone are identical pixels; what makes one phishing is the mismatch. "
-        "Do not call a login form malicious merely for being a login form.",
+        _brand_question(domain, domain_is_verified),
         "  3. What is it asking for? Credentials, card details, MFA codes and "
         "seed phrases raise the stakes; a brochure page does not.",
         "  4. Any signs of a kit — a rescaled or pixelated logo, mismatched "

@@ -866,3 +866,48 @@ async def test_capabilities_stays_quiet_about_the_endpoint_by_default():
     report = await s.server_capabilities()
     assert report["endpoint"] == "https://urlscan.io"
     assert "endpoint_note" not in report
+
+
+# -- the brief without a domain --------------------------------------------
+#
+# The screenshot needs no key; the result document does. So the configuration
+# the README recommends most loudly — no key — is exactly the one where the
+# brief has no domain to compare the brand against, and the instruction that
+# stops a model calling every login form phishing quietly loses its subject.
+
+
+def test_brief_refuses_the_comparison_when_no_domain_is_known():
+    from urlscan_mcp import screenshots
+
+    brief = screenshots.analysis_brief({"page": {}, "verdict": {}})
+    assert "could not be determined" in brief
+    assert "cannot be made from" in brief
+    # The old text asked whether the brand matched "unknown", which a model
+    # answers anyway — wrongly, in whichever direction it lands.
+    assert "match the domain it is served from — unknown" not in brief
+    assert "match unknown" not in brief
+    # And it must not let either conclusion in through the back door.
+    assert "do NOT call it legitimate" in brief.replace("Do NOT", "do NOT")
+
+
+def test_brief_marks_a_caller_supplied_domain_as_unverified():
+    from urlscan_mcp import screenshots
+
+    brief = screenshots.analysis_brief(
+        {"page": {}, "verdict": {}}, claimed_domain="login-microsoft.example"
+    )
+    assert "NOT confirmed against this scan's record" in brief
+    assert "the domain the caller says" in brief
+    assert "login-microsoft.example" in brief
+
+
+def test_a_verified_domain_outranks_a_caller_supplied_one():
+    """A caller can be wrong, or lying. The scan record cannot."""
+    from urlscan_mcp import screenshots
+
+    brief = screenshots.analysis_brief(
+        {"page": {"domain": "real.example"}, "verdict": {}},
+        claimed_domain="attacker-says.example",
+    )
+    assert "served from domain: real.example" in brief
+    assert "attacker-says.example" not in brief
