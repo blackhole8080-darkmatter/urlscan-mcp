@@ -70,27 +70,43 @@ async def main() -> int:
     print(f"before={before}  after={client.cache_stats}  (hits should be +1)")
 
     # 3. Screenshot — the real dimensions and byte sizes I could only guess at.
-    if not report.get("sample_scans"):
+    #
+    # Several candidates, not just the first: a scan that failed to render
+    # never produces a screenshot, and giving up on the first 404 would end
+    # this check having verified nothing about the part it exists to verify.
+    candidates = [s["uuid"] for s in report.get("sample_scans", []) if s.get("uuid")]
+    if not candidates:
         print("\n(no sample scans, so no screenshot to fetch)")
         await client.aclose()
         return 0
 
-    uuid = report["sample_scans"][0]["uuid"]
-    head(f"3. screenshot: {uuid}")
-    try:
-        data = await client.request_bytes(
-            screenshots.SCREENSHOT_URL.format(uuid=uuid),
-            action="Fetching a screenshot",
-            max_bytes=screenshots.MAX_IMAGE_BYTES,
-        )
-    except ImageTooLarge as exc:
-        print(f"refused at {exc.size_bytes:,} bytes — ceiling is "
-              f"{screenshots.MAX_IMAGE_BYTES:,}. If real captures routinely hit "
-              "this, the ceiling is too low.")
-        await client.aclose()
-        return 0
-    except (ScanPending, UrlscanError) as exc:
-        print(f"no screenshot: {exc}")
+    head(f"3. screenshot ({len(candidates)} candidate(s))")
+    data = None
+    oversized = 0
+    for uuid in candidates:
+        try:
+            data = await client.request_bytes(
+                screenshots.SCREENSHOT_URL.format(uuid=uuid),
+                action="Fetching a screenshot",
+                max_bytes=screenshots.MAX_IMAGE_BYTES,
+            )
+        except ImageTooLarge as exc:
+            oversized += 1
+            print(f"{uuid}: refused at {exc.size_bytes:,} bytes — ceiling is "
+                  f"{screenshots.MAX_IMAGE_BYTES:,}")
+            continue
+        except (ScanPending, UrlscanError) as exc:
+            print(f"{uuid}: {exc}")
+            continue
+        print(f"{uuid}: fetched")
+        break
+
+    if oversized:
+        print(f"\n{oversized} of {len(candidates)} capture(s) exceeded "
+              f"MAX_IMAGE_BYTES ({screenshots.MAX_IMAGE_BYTES:,}). If that is the "
+              "common case rather than the exception, the ceiling is too low.")
+    if data is None:
+        print("\nno screenshot available from any sample scan")
         await client.aclose()
         return 0
 
@@ -101,7 +117,9 @@ async def main() -> int:
         from PIL import Image
 
         with Image.open(BytesIO(data)) as img:
-            print(f"raw dimensions: {img.size[0]}x{img.size[1]}")
+            print(f"raw dimensions: {img.size[0]}x{img.size[1]}  "
+                  f"(aspect {img.size[1] / max(1, img.size[0]):.1f}:1, "
+                  f"crop threshold {screenshots.MAX_ASPECT_RATIO}:1)")
     except ImportError:
         print("(install pillow to see dimensions and exercise downscaling)")
 

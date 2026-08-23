@@ -260,9 +260,11 @@ A live check is `python live_check.py [domain-or-url]` — it exercises what
 offline tests cannot: real search reachability, whether `total` comes back so
 the sampling note fires, real screenshot dimensions and byte sizes, and whether
 the downscale thresholds suit real captures. No key needed for the search and
-screenshot parts.
+screenshot parts. It is itself covered by `tests/test_live_check.py`, which
+drives it against a local stand-in — a script whose whole purpose is to be run
+rarely, by hand, is the one most likely to have rotted by the time you run it.
 
-74 offline tests — no network, no key required. They cover query escaping,
+77 offline tests — no network, no key required. They cover query escaping,
 redirector matching (`page.*` vs `task.*`), input validation, auth degradation,
 response shaping against malformed documents, and the assessment logic's
 refusal to imply safety — including `build_assessment` directly, since
