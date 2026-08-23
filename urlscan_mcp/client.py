@@ -14,7 +14,12 @@ from typing import Any
 
 import httpx
 
-BASE_URL = "https://urlscan.io"
+from . import endpoint
+
+#: Re-exported so existing callers and tests keep working; the definition
+#: (and the URLSCAN_BASE_URL override) lives in endpoint.py, shared with the
+#: screenshot fetcher so the two cannot drift onto different hosts.
+BASE_URL = endpoint.BASE_URL
 USER_AGENT = "urlscan-mcp/0.1 (+https://github.com/)"
 DEFAULT_TIMEOUT = 30.0
 

@@ -18,6 +18,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Image
 
+from . import endpoint
 from . import query as q
 from . import screenshots
 from .assess import build_assessment
@@ -388,11 +389,21 @@ async def server_capabilities() -> dict[str, Any]:
     return {
         "authenticated": client.authenticated,
         "available": caps,
+        "endpoint": endpoint.BASE_URL,
         "note": (
             "Read-only mode: set URLSCAN_API_KEY to enable scan submission."
             if not client.authenticated
             else "Fully configured."
         ),
+        # Every caveat these tools attach — about verdicts, about corpus
+        # coverage — describes urlscan.io. Against a self-hosted instance they
+        # may not hold, and a report that quietly implied otherwise would be
+        # the same failure this server exists to avoid.
+        **({"endpoint_note": (
+            f"Pointed at {endpoint.BASE_URL}, not urlscan.io, via URLSCAN_BASE_URL. "
+            "Corpus coverage and verdict behaviour are that instance's, not the "
+            "public service's."
+        )} if not endpoint.is_public() else {}),
     }
 
 

@@ -806,3 +806,63 @@ async def test_a_tall_page_is_shrunk_before_it_reaches_the_model(stub_scan):
     text = next(b.text for b in blocks if getattr(b, "type", "") == "text")
     assert len(image.data) < len(stub_scan["png"]), "should be smaller than the source"
     assert "cropped" in text and "downscaled" in text
+
+
+# -- endpoint override -----------------------------------------------------
+#
+# urlscan sells a self-hosted appliance, and an integration test cannot prove
+# an image survives a subprocess boundary unless it can serve one. Both need
+# the host to be configurable — and both need the *same* host everywhere, so a
+# self-hosted deployment does not send its key to one service and read images
+# from another.
+
+
+def test_endpoint_defaults_to_the_public_service(monkeypatch):
+    import importlib
+
+    from urlscan_mcp import endpoint
+
+    monkeypatch.delenv("URLSCAN_BASE_URL", raising=False)
+    reloaded = importlib.reload(endpoint)
+    try:
+        assert reloaded.BASE_URL == "https://urlscan.io"
+        assert reloaded.SCREENSHOT_URL == "https://urlscan.io/screenshots/{uuid}.png"
+        assert reloaded.is_public()
+    finally:
+        importlib.reload(endpoint)
+
+
+def test_endpoint_override_moves_json_and_images_together(monkeypatch):
+    import importlib
+
+    from urlscan_mcp import endpoint
+
+    monkeypatch.setenv("URLSCAN_BASE_URL", "https://urlscan.internal.example/")
+    reloaded = importlib.reload(endpoint)
+    try:
+        # Trailing slash stripped, so no //api/v1/ for a caller who set it.
+        assert reloaded.BASE_URL == "https://urlscan.internal.example"
+        assert reloaded.SCREENSHOT_URL.startswith("https://urlscan.internal.example/")
+        assert not reloaded.is_public()
+    finally:
+        monkeypatch.delenv("URLSCAN_BASE_URL", raising=False)
+        importlib.reload(endpoint)
+
+
+@pytest.mark.asyncio
+async def test_capabilities_says_when_it_is_not_urlscan_io(monkeypatch):
+    """A caveat about urlscan.io's corpus is not a caveat about someone
+    else's, and a report that hid the swap would be the class of quiet
+    misdirection this server exists to avoid."""
+    monkeypatch.setattr(s.endpoint, "BASE_URL", "https://urlscan.internal.example")
+    monkeypatch.setattr(s.endpoint, "is_public", lambda: False)
+    report = await s.server_capabilities()
+    assert report["endpoint"] == "https://urlscan.internal.example"
+    assert "not urlscan.io" in report["endpoint_note"]
+
+
+@pytest.mark.asyncio
+async def test_capabilities_stays_quiet_about_the_endpoint_by_default():
+    report = await s.server_capabilities()
+    assert report["endpoint"] == "https://urlscan.io"
+    assert "endpoint_note" not in report

@@ -33,8 +33,12 @@ from __future__ import annotations
 
 from typing import Any
 
-#: urlscan serves screenshots off the main host, no API key required.
-SCREENSHOT_URL = "https://urlscan.io/screenshots/{uuid}.png"
+from . import endpoint
+
+#: urlscan serves screenshots off the main host, no API key required. Shared
+#: with the JSON client so a self-hosted instance is not read half from one
+#: host and half from another.
+SCREENSHOT_URL = endpoint.SCREENSHOT_URL
 
 #: Refuse anything past this rather than blow up the caller's context. Full-page
 #: captures of long pages run to several megabytes, and a base64 image costs the

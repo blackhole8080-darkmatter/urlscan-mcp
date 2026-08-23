@@ -78,6 +78,13 @@ Optional but recommended — a free API key from
 cp .env.example .env   # then set URLSCAN_API_KEY
 ```
 
+Pointing at a self-hosted urlscan appliance instead of the public service is
+`URLSCAN_BASE_URL=https://urlscan.internal.example`. Both the API calls and the
+screenshot fetches follow it — they read one setting, so an instance cannot be
+half-configured — and `server_capabilities` then says which host it is talking
+to, because the caveats these tools attach describe urlscan.io's corpus and
+verdicts, not somebody else's.
+
 ### Claude Code
 
 ```bash
@@ -264,7 +271,7 @@ screenshot parts. It is itself covered by `tests/test_live_check.py`, which
 drives it against a local stand-in — a script whose whole purpose is to be run
 rarely, by hand, is the one most likely to have rotted by the time you run it.
 
-77 offline tests — no network, no key required. They cover query escaping,
+81 offline tests — no network, no key required. They cover query escaping,
 redirector matching (`page.*` vs `task.*`), input validation, auth degradation,
 response shaping against malformed documents, and the assessment logic's
 refusal to imply safety — including `build_assessment` directly, since
