@@ -271,10 +271,14 @@ pytest
 ```
 
 A live check is `python live_check.py [domain-or-url]` — it exercises what
-offline tests cannot: real search reachability, whether `total` comes back so
-the sampling note fires, real screenshot dimensions and byte sizes, and whether
-the downscale thresholds suit real captures. No key needed for the search and
-screenshot parts. It is itself covered by `tests/test_live_check.py`, which
+offline tests cannot, and reaches a verdict rather than printing numbers to
+squint at. It measures every screenshot the sample offers and then says, for
+each of `MAX_IMAGE_BYTES`, `MAX_ASPECT_RATIO` and `TARGET_WIDTH`, whether the
+value is doing its job: a ceiling nothing reaches has headroom, a ceiling
+everything reaches is too low, and a crop that fires on every page is below the
+normal page rather than above it. Those three numbers were chosen against
+synthetic images, so this is how they get checked against real ones. No key
+needed for the search and screenshot parts. It is itself covered by `tests/test_live_check.py`, which
 drives it against a local stand-in — a script whose whole purpose is to be run
 rarely, by hand, is the one most likely to have rotted by the time you run it.
 

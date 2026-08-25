@@ -161,9 +161,18 @@ def test_live_check_runs_all_four_stages(stub_urlscan, monkeypatch, capsys):
     assert "'hits': 1" in out
 
     # Stage 3: the first two candidates 404, so this only passes if the walk
-    # continues past a scan that never rendered.
+    # continues past a scan that never rendered — and it measures every
+    # remaining candidate rather than stopping at the first that works.
     assert "no screenshot available" not in out
-    assert "raw: " in out and "prepared: " in out
+    assert "captures measured:" in out
+    assert "raw bytes:" in out
+
+    # Stage 3b is the reason the script exists: it has to reach a verdict on
+    # each threshold rather than print numbers for a human to squint at.
+    assert "are the thresholds right?" in out
+    assert "MAX_IMAGE_BYTES" in out
+    assert "MAX_ASPECT_RATIO" in out
+    assert "TARGET_WIDTH" in out
 
     # Stage 4: the brief ships the domain and the redirect, and refuses to read
     # a missing verdict as clean.

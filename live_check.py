@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from typing import Any
 
 from urlscan_mcp import assess, query, screenshots
 from urlscan_mcp.client import ImageTooLarge, ScanPending, UrlscanClient, UrlscanError
@@ -69,64 +70,120 @@ async def main() -> int:
                          params={"q": q, "size": 100})
     print(f"before={before}  after={client.cache_stats}  (hits should be +1)")
 
-    # 3. Screenshot — the real dimensions and byte sizes I could only guess at.
+    # 3. Screenshots — the shapes the thresholds were guessed against.
     #
-    # Several candidates, not just the first: a scan that failed to render
-    # never produces a screenshot, and giving up on the first 404 would end
-    # this check having verified nothing about the part it exists to verify.
+    # Every capture the sample offers, not the first that works. One screenshot
+    # answers "does this path function"; only a spread answers "are 3 MB, 1024px
+    # and 2.5:1 the right numbers", which is the question that cannot be settled
+    # without the live API. The verdict below is the point of the whole script.
     candidates = [s["uuid"] for s in report.get("sample_scans", []) if s.get("uuid")]
     if not candidates:
-        print("\n(no sample scans, so no screenshot to fetch)")
+        print("\n(no sample scans, so no screenshots to measure)")
         await client.aclose()
         return 0
 
-    head(f"3. screenshot ({len(candidates)} candidate(s))")
-    data = None
+    head(f"3. screenshots ({len(candidates)} candidate(s))")
+    measured: list[dict[str, Any]] = []
     oversized = 0
     for uuid in candidates:
         try:
-            data = await client.request_bytes(
+            raw = await client.request_bytes(
                 screenshots.SCREENSHOT_URL.format(uuid=uuid),
                 action="Fetching a screenshot",
                 max_bytes=screenshots.MAX_IMAGE_BYTES,
             )
         except ImageTooLarge as exc:
             oversized += 1
-            print(f"{uuid}: refused at {exc.size_bytes:,} bytes — ceiling is "
-                  f"{screenshots.MAX_IMAGE_BYTES:,}")
+            print(f"  {uuid[:8]}  REFUSED at {exc.size_bytes:>10,} bytes "
+                  f"(ceiling {screenshots.MAX_IMAGE_BYTES:,})")
+            measured.append({"uuid": uuid, "raw": exc.size_bytes, "refused": True})
             continue
         except (ScanPending, UrlscanError) as exc:
-            print(f"{uuid}: {exc}")
+            print(f"  {uuid[:8]}  {exc}")
             continue
-        print(f"{uuid}: fetched")
-        break
 
-    if oversized:
-        print(f"\n{oversized} of {len(candidates)} capture(s) exceeded "
-              f"MAX_IMAGE_BYTES ({screenshots.MAX_IMAGE_BYTES:,}). If that is the "
-              "common case rather than the exception, the ceiling is too low.")
-    if data is None:
+        entry: dict[str, Any] = {"uuid": uuid, "raw": len(raw), "refused": False}
+        try:
+            from io import BytesIO
+
+            from PIL import Image
+
+            with Image.open(BytesIO(raw)) as img:
+                entry["width"], entry["height"] = img.size
+                entry["aspect"] = img.size[1] / max(1, img.size[0])
+        except ImportError:
+            pass
+
+        prepared, note = screenshots.prepare(raw)
+        entry["prepared"] = len(prepared)
+        entry["note"] = note
+        measured.append(entry)
+
+        shape = (f'{entry["width"]}x{entry["height"]} {entry["aspect"]:.1f}:1'
+                 if "width" in entry else "(install pillow for dimensions)")
+        print(f'  {uuid[:8]}  {entry["raw"]:>10,} -> {entry["prepared"]:>9,} bytes  {shape}')
+
+    if not measured:
         print("\nno screenshot available from any sample scan")
         await client.aclose()
         return 0
 
-    print(f"raw: {len(data):,} bytes")
-    try:
-        from io import BytesIO
+    # ---- the verdict -------------------------------------------------------
+    head("3b. are the thresholds right?")
+    fetched = [m for m in measured if not m["refused"]]
+    raws = sorted(m["raw"] for m in measured)
+    median = raws[len(raws) // 2]
+    print(f"captures measured:     {len(measured)}")
+    print(f"raw bytes:             min {raws[0]:,}  median {median:,}  max {raws[-1]:,}")
 
-        from PIL import Image
+    print(f"\nMAX_IMAGE_BYTES = {screenshots.MAX_IMAGE_BYTES:,}")
+    if oversized == 0:
+        print(f"  OK — nothing hit the ceiling. Headroom over the largest: "
+              f"{screenshots.MAX_IMAGE_BYTES / max(1, raws[-1]):.1f}x.")
+    elif oversized <= len(measured) // 4:
+        print(f"  Borderline — {oversized} of {len(measured)} refused. A rare "
+              "refusal is the ceiling doing its job.")
+    else:
+        print(f"  TOO LOW — {oversized} of {len(measured)} refused. Refusing the "
+              "common case makes the tool useless, not safe. Raise it.")
 
-        with Image.open(BytesIO(data)) as img:
-            print(f"raw dimensions: {img.size[0]}x{img.size[1]}  "
-                  f"(aspect {img.size[1] / max(1, img.size[0]):.1f}:1, "
-                  f"crop threshold {screenshots.MAX_ASPECT_RATIO}:1)")
-    except ImportError:
-        print("(install pillow to see dimensions and exercise downscaling)")
+    aspects = [m["aspect"] for m in fetched if "aspect" in m]
+    if aspects:
+        cropped = [a for a in aspects if a > screenshots.MAX_ASPECT_RATIO]
+        print(f"\nMAX_ASPECT_RATIO = {screenshots.MAX_ASPECT_RATIO}")
+        print(f"  page aspect: min {min(aspects):.1f}:1  median "
+              f"{sorted(aspects)[len(aspects) // 2]:.1f}:1  max {max(aspects):.1f}:1")
+        if not cropped:
+            print("  Never fires on this sample — either these pages are short, "
+                  "or the threshold is too generous to protect anything.")
+        elif len(cropped) == len(aspects):
+            print("  Fires on every capture. Cropping every page means the "
+                  "threshold is below the normal page, not above it — the model "
+                  "is losing content it should be seeing.")
+        else:
+            print(f"  Fires on {len(cropped)} of {len(aspects)} — a threshold "
+                  "that discriminates, which is what it is for.")
 
-    prepared, note = screenshots.prepare(data)
-    print(f"prepared: {len(prepared):,} bytes  ({len(prepared) / max(1, len(data)):.0%} of raw)")
-    print(f"note: {note}")
-    print(f"base64 to the model: ~{len(prepared) * 4 // 3:,} chars")
+    widths = [m["width"] for m in fetched if "width" in m]
+    if widths:
+        print(f"\nTARGET_WIDTH = {screenshots.TARGET_WIDTH}")
+        print(f"  capture width: {sorted(set(widths))}")
+        if all(w <= screenshots.TARGET_WIDTH for w in widths):
+            print("  No downscaling happens — captures are already this narrow, "
+                  "so the setting costs nothing and does nothing.")
+        else:
+            ratios = [m["prepared"] / max(1, m["raw"]) for m in fetched if "prepared" in m]
+            if ratios:
+                print(f"  Downscaling to {screenshots.TARGET_WIDTH}px leaves "
+                      f"{sum(ratios) / len(ratios):.0%} of the bytes on average.")
+
+    data = next((m for m in fetched), None)
+    if data is None:
+        await client.aclose()
+        return 0
+    uuid = data["uuid"]
+    print(f"\nnote from {uuid[:8]}: {data.get('note')}")
+    print(f"base64 to the model: ~{data['prepared'] * 4 // 3:,} chars")
 
     # 4. What ships alongside the image.
     head("4. analysis brief")
